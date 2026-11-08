@@ -1,0 +1,84 @@
+<!doctype html>
+<html lang="th">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>OCR Slip Scanner</title>
+  <link rel="stylesheet" href="css/style.css" />
+  <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5.1.1/dist/tesseract.min.js"></script>
+</head>
+<body>
+  <header>
+    <h1>OCR Slip — สแกนใบเสร็จและสลิปโอนเงิน</h1>
+    <p class="lead">ถ่ายจากกล้องหรือเลือกรูปภาพ ระบบจะอ่านข้อความ (ไทย/อังกฤษ) ดึงยอดเงิน วันที่ และเลขอ้างอิง แล้วส่งออกเป็นไฟล์ <a href="#results-section">CSV</a> ได้ทันที</p>
+    <p class="muted">ประมวลผลในเบราว์เซอร์ทั้งหมด ไม่มีการบันทึกข้อมูลลงฐานข้อมูล</p>
+  </header>
+
+  <main>
+    <section class="card">
+      <div class="tabs" role="tablist">
+        <button class="tab active" data-tab="upload" role="tab">เลือกรูปภาพ</button>
+        <button class="tab" data-tab="camera" role="tab">กล้อง</button>
+      </div>
+
+      <div class="panel" id="panel-upload">
+        <label class="dropzone" id="dropzone">
+          <input type="file" id="fileInput" accept="image/*" multiple hidden />
+          <span><u>แตะเพื่อเลือกรูป</u> หรือลากไฟล์มาวางที่นี่<br /><span class="muted">เลือกได้หลายรูป · วางจากคลิปบอร์ดได้ (Ctrl+V)</span></span>
+        </label>
+      </div>
+
+      <div class="panel hidden" id="panel-camera">
+        <div class="video-wrap">
+          <video id="video" playsinline muted></video>
+          <div class="guide"></div>
+        </div>
+        <div class="row">
+          <button id="startCam">เปิดกล้อง</button>
+          <button id="captureBtn" class="primary" disabled>ถ่ายและสแกน</button>
+          <button id="switchCam" disabled>สลับกล้อง</button>
+          <button id="stopCam" disabled>ปิดกล้อง</button>
+        </div>
+        <p class="muted" id="camHint">ถ้าเปิดกล้องไม่ได้ ใช้แท็บ “เลือกรูปภาพ” บนมือถือจะเลือกถ่ายรูปได้เช่นกัน</p>
+      </div>
+
+      <label class="check"><input type="checkbox" id="binarize" checked /> ปรับภาพขาวดำก่อนสแกน (แนะนำ)</label>
+
+      <div id="status" class="status hidden">
+        <div class="bar"><div id="progress"></div></div>
+        <span id="statusText"></span>
+      </div>
+    </section>
+
+    <section class="card" id="results-section">
+      <div class="section-head">
+        <h2>ผลการสแกน (<span id="count">0</span>)</h2>
+        <div class="row">
+          <button id="exportSummary" class="primary" disabled>ดาวน์โหลด CSV สรุป →</button>
+          <button id="exportItems" disabled>CSV รายการสินค้า</button>
+          <button id="clearAll" disabled>ล้างทั้งหมด</button>
+        </div>
+      </div>
+      <p class="muted">แก้ไขค่าได้ก่อนส่งออก · ข้อมูลอยู่ในหน้านี้เท่านั้น ปิดหรือรีเฟรชแล้วจะหายไป</p>
+      <div id="results"><p class="empty">ยังไม่มีผลการสแกน</p></div>
+    </section>
+  </main>
+  <footer>OCR โดย Tesseract.js · ไฟล์ CSV เป็น UTF-8 (BOM) เปิดใน Excel/Google Sheets ได้</footer>
+
+  <template id="resultTpl">
+    <article class="result">
+      <img class="thumb" alt="" />
+      <div class="fields">
+        <div class="fname"></div>
+        <div class="badge-row"><span class="badge type"></span><span class="badge plain conf"></span></div>
+        <div class="grid"></div>
+        <details class="items-wrap"><summary>รายการสินค้า</summary><table class="items"></table></details>
+        <details><summary>ข้อความดิบ (OCR)</summary><pre class="raw"></pre></details>
+        <button class="remove linklike">ลบรายการนี้</button>
+      </div>
+    </article>
+  </template>
+
+  <script type="module" src="js/app.js"></script>
+</body>
+</html>
