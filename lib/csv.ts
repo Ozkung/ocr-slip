@@ -1,6 +1,10 @@
 // CSV export (UTF-8 with BOM so Excel shows Thai correctly).
 
-export const SUMMARY_COLUMNS = [
+import type { ScanData, ScanRecord } from './types';
+
+type Row = Partial<ScanData> & { file?: string };
+
+export const SUMMARY_COLUMNS: [keyof Row, string][] = [
   ['file', 'ไฟล์'],
   ['type', 'ประเภท'],
   ['merchant', 'ร้านค้า/ผู้รับ'],
@@ -15,7 +19,9 @@ export const SUMMARY_COLUMNS = [
   ['to', 'ถึง'],
 ];
 
-export function escapeCsv(value) {
+const TYPE_LABEL: Record<string, string> = { receipt: 'ใบเสร็จ', slip: 'สลิปโอนเงิน' };
+
+export function escapeCsv(value: unknown): string {
   if (value == null) return '';
   let s = String(value);
   // Guard against spreadsheet formula injection.
@@ -23,28 +29,28 @@ export function escapeCsv(value) {
   return /[",\n\r]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
 }
 
-const row = (cells) => cells.map(escapeCsv).join(',');
+const row = (cells: unknown[]) => cells.map(escapeCsv).join(',');
+const BOM = '﻿';
 
 /** One row per scanned document. */
-export function toSummaryCsv(records) {
+export function toSummaryCsv(records: Row[]): string {
   const lines = [row(SUMMARY_COLUMNS.map(([, label]) => label))];
-  const typeLabel = { receipt: 'ใบเสร็จ', slip: 'สลิปโอนเงิน' };
   for (const r of records) {
-    lines.push(row(SUMMARY_COLUMNS.map(([key]) => (key === 'type' ? typeLabel[r.type] || r.type : r[key]))));
+    lines.push(row(SUMMARY_COLUMNS.map(([key]) => (key === 'type' ? TYPE_LABEL[r.type ?? ''] ?? r.type : r[key]))));
   }
-  return `﻿${lines.join('\r\n')}\r\n`;
+  return `${BOM}${lines.join('\r\n')}\r\n`;
 }
 
 /** One row per line item (receipts). */
-export function toItemsCsv(records) {
+export function toItemsCsv(records: Row[]): string {
   const lines = [row(['ไฟล์', 'ร้านค้า', 'วันที่', 'รายการ', 'จำนวน', 'ราคา'])];
   for (const r of records) {
-    for (const it of r.items || []) lines.push(row([r.file, r.merchant, r.date, it.name, it.qty, it.amount]));
+    for (const it of r.items ?? []) lines.push(row([r.file, r.merchant, r.date, it.name, it.qty, it.amount]));
   }
-  return `﻿${lines.join('\r\n')}\r\n`;
+  return `${BOM}${lines.join('\r\n')}\r\n`;
 }
 
-export function downloadCsv(content, filename) {
+export function downloadCsv(content: string, filename: string): void {
   const blob = new Blob([content], { type: 'text/csv;charset=utf-8' });
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
@@ -55,3 +61,5 @@ export function downloadCsv(content, filename) {
   a.remove();
   setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
+
+export type { ScanRecord };
