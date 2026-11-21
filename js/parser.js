@@ -1,12 +1,9 @@
-// Rule-based helpers for Thai/English receipts and bank slips.
-// Used to (1) normalise the vision model's JSON (BE years, "1,234.50" strings, …) and
-// (2) fall back to keyword/regex parsing when the model returns plain text instead of JSON.
-
-import type { DocType, LineItem, ScanData } from './types';
+// Receipt / bank-slip text parser.
+// Turns raw OCR text (Thai + English) into structured fields.
 
 const THAI_DIGITS = '๐๑๒๓๔๕๖๗๘๙';
 
-const THAI_MONTHS: string[][] = [
+const THAI_MONTHS = [
   ['มกราคม', 'ม.ค.', 'มค'],
   ['กุมภาพันธ์', 'ก.พ.', 'กพ'],
   ['มีนาคม', 'มี.ค.', 'มีค'],
@@ -41,46 +38,40 @@ const SLIP_KEYWORDS = [
   'promptpay', 'พร้อมเพย์', 'เลขที่รายการ', 'รหัสอ้างอิง', 'transfer', 'ค่าธรรมเนียม',
 ];
 
-export function emptyScanData(type: DocType = 'receipt'): ScanData {
-  return {
-    type, merchant: '', date: '', time: '', total: null, subtotal: null, vat: null,
-    taxId: '', reference: '', from: '', to: '', items: [],
-  };
-}
-
-/** Collapse "ยอ ด รวม" (spaces inside Thai words) only when gaps are dense. */
-function collapseThaiSpacing(line: string): string {
-  const thaiChars = (line.match(/[฀-๿]/g) || []).length;
-  const gaps = (line.match(/[฀-๿] (?=[฀-๿])/g) || []).length;
-  if (!gaps || gaps / thaiChars <= 0.25) return line;
-  let out = line;
-  for (let i = 0; i < 3; i++) out = out.replace(/([฀-๿]) (?=[฀-๿])/g, '$1');
-  return out;
-}
-
-export function thaiDigitsToArabic(s: string): string {
-  return s.replace(/[๐-๙]/g, (d) => String(THAI_DIGITS.indexOf(d)));
-}
-
-/** Normalise OCR text: Thai digits → Arabic, tidy whitespace. */
-export function normalizeText(text: unknown): string {
-  return thaiDigitsToArabic(String(text ?? ''))
-    .replace(/\r/g, '')
-    .replace(/[ \t]+/g, ' ')
+/** Normalise OCR text: Thai digits → Arabic, collapse spaces Tesseract puts between Thai glyphs. */
+export function normalizeText(text) {
+  let t = String(text || '');
+  t = t.replace(/[๐-๙]/g, (d) => String(THAI_DIGITS.indexOf(d)));
+  t = t.replace(/\r/g, '');
+  t = t.replace(/[ \t]+/g, ' ');
+  return t
     .split('\n')
     .map((l) => collapseThaiSpacing(l.trim()))
     .filter(Boolean)
     .join('\n');
 }
 
-/** Parse "1,234.50" / "฿ 89" / "1234,50" / 89 → number (or null). */
-export function parseAmount(input: unknown): number | null {
-  if (input == null || input === '') return null;
-  if (typeof input === 'number') return Number.isFinite(input) ? input : null;
-  let s = thaiDigitsToArabic(String(input)).replace(/[฿$]|บาท|thb/gi, '').trim();
+/**
+ * Tesseract often outputs Thai as "ยอ ด รวม" (spaces inside words). Real Thai text has few spaces,
+ * so only collapse when Thai-space-Thai gaps are dense relative to the amount of Thai text.
+ */
+function collapseThaiSpacing(line) {
+  const thaiChars = (line.match(/[฀-๿]/g) || []).length;
+  const gaps = (line.match(/[฀-๿] (?=[฀-๿])/g) || []).length;
+  if (!gaps || gaps / thaiChars < 0.2) return line;
+  let out = line;
+  for (let i = 0; i < 3; i++) out = out.replace(/([฀-๿]) (?=[฀-๿])/g, '$1');
+  return out;
+}
+
+/** Parse "1,234.50" / "1 234.50" / "1234,50" → 1234.5 (or null). */
+export function parseAmount(str) {
+  if (str == null) return null;
+  let s = String(str).replace(/[฿$]|บาท|thb/gi, '').trim();
   const m = s.match(/-?\d{1,3}(?:[,\s]\d{3})+(?:[.,]\d{1,2})?|-?\d+(?:[.,]\d{1,2})?/);
   if (!m) return null;
   s = m[0].replace(/\s/g, '');
+  // Decide decimal separator: last "." or "," followed by 1-2 digits at end.
   const dec = s.match(/[.,](\d{1,2})$/);
   if (dec) {
     const intPart = s.slice(0, -dec[0].length).replace(/[.,]/g, '');
@@ -92,11 +83,10 @@ export function parseAmount(input: unknown): number | null {
   return Number.isFinite(n) ? n : null;
 }
 
-interface Money { value: number; raw: string; decimal: boolean }
-
-function amountsInLine(line: string): Money[] {
+/** All money-looking numbers in a line (prefers values with 2 decimals). */
+function amountsInLine(line) {
   const re = /\d{1,3}(?:,\d{3})+(?:\.\d{1,2})?|\d+\.\d{2}\b|\d+(?=\s*(?:บาท|thb|฿)\b)|\b\d+\b/gi;
-  const out: Money[] = [];
+  const out = [];
   for (const m of line.matchAll(re)) {
     const v = parseAmount(m[0]);
     if (v != null) out.push({ value: v, raw: m[0], decimal: /\.\d{2}$/.test(m[0]) });
@@ -104,56 +94,61 @@ function amountsInLine(line: string): Money[] {
   return out;
 }
 
-function lastMoney(line: string): number | null {
+function lastMoney(line) {
   const list = amountsInLine(line);
   const withDec = list.filter((a) => a.decimal || a.raw.includes(','));
   const pick = (withDec.length ? withDec : list).at(-1);
   return pick ? pick.value : null;
 }
 
-function toCE(year: string | number): number {
+function toCE(year) {
   let y = Number(year);
   if (y < 100) y += y >= 40 ? 2500 : 2000; // 67 → 2567 (BE), 24 → 2024
   if (y > 2400) y -= 543; // Buddhist Era → CE
   return y;
 }
 
-const pad = (n: string | number) => String(n).padStart(2, '0');
+const pad = (n) => String(n).padStart(2, '0');
 
-function validDate(y: number, m: number, d: number): string | null {
+function validDate(y, m, d) {
   if (m < 1 || m > 12 || d < 1 || d > 31 || y < 1990 || y > 2100) return null;
   return `${y}-${pad(m)}-${pad(d)}`;
 }
 
-/** Extract a date (ISO yyyy-mm-dd, CE). Supports BE years, Thai/English month names. */
-export function parseDate(text: unknown): string {
+/** Extract date (ISO yyyy-mm-dd) from text; supports BE years and Thai/English month names. */
+export function parseDate(text) {
   const t = normalizeText(text);
-  let m = t.match(/\b(\d{4})[/\-.](\d{1,2})[/\-.](\d{1,2})\b/);
-  if (m) {
-    const r = validDate(toCE(m[1]), Number(m[2]), Number(m[3]));
-    if (r) return r;
-  }
-  m = t.match(/\b(\d{1,2})[/\-.](\d{1,2})[/\-.](\d{2,4})\b/);
+  // dd/mm/yyyy, dd-mm-yy, dd.mm.yyyy
+  let m = t.match(/\b(\d{1,2})[/\-.](\d{1,2})[/\-.](\d{2,4})\b/);
   if (m) {
     const r = validDate(toCE(m[3]), Number(m[2]), Number(m[1]));
     if (r) return r;
   }
-  // OCR sometimes reads the 2nd "/" as a digit: "08/1102567" → 08/11/2567
+  // OCR often reads the 2nd "/" as a digit: "08/1102567" → 08/11/2567
   m = t.match(/\b(\d{1,2})[/\-.](\d{2})\d((?:25|20)\d{2})\b/);
   if (m) {
     const r = validDate(toCE(m[3]), Number(m[2]), Number(m[1]));
     if (r) return r;
   }
+  // yyyy-mm-dd
+  m = t.match(/\b(\d{4})[/\-.](\d{1,2})[/\-.](\d{1,2})\b/);
+  if (m) {
+    const r = validDate(toCE(m[1]), Number(m[2]), Number(m[3]));
+    if (r) return r;
+  }
+  // 8 พ.ย. 67 / 8 พฤศจิกายน 2567
   for (let i = 0; i < THAI_MONTHS.length; i++) {
     for (const name of THAI_MONTHS[i]) {
       const esc = name.replace(/\./g, '\\.?');
-      const mm = t.match(new RegExp(`(\\d{1,2})\\s*${esc}\\s*(\\d{2,4})`));
+      const re = new RegExp(`(\\d{1,2})\\s*${esc}\\s*(\\d{2,4})`);
+      const mm = t.match(re);
       if (mm) {
         const r = validDate(toCE(mm[2]), i + 1, Number(mm[1]));
         if (r) return r;
       }
     }
   }
+  // 8 Nov 2024 / Nov 8, 2024
   m = t.match(/\b(\d{1,2})\s*([A-Za-z]{3})[a-z]*\.?,?\s*(\d{2,4})\b/);
   if (m && EN_MONTHS.includes(m[2].toLowerCase())) {
     const r = validDate(toCE(m[3]), EN_MONTHS.indexOf(m[2].toLowerCase()) + 1, Number(m[1]));
@@ -167,17 +162,18 @@ export function parseDate(text: unknown): string {
   return '';
 }
 
-export function parseTime(text: unknown): string {
-  const m = normalizeText(text).match(/\b([01]?\d|2[0-3])[:.]([0-5]\d)(?:[:.]([0-5]\d))?/);
+export function parseTime(text) {
+  const m = normalizeText(text).match(/\b([01]?\d|2[0-3])[:.]([0-5]\d)(?:[:.]([0-5]\d))?\s*(?:น\.?)?/);
   return m ? `${pad(m[1])}:${m[2]}${m[3] ? `:${m[3]}` : ''}` : '';
 }
 
-const has = (line: string, words: string[]) => {
+const has = (line, words) => {
   const l = line.toLowerCase();
   return words.some((w) => l.includes(w));
 };
 
-function findByKeywords(lines: string[], keywords: string[]): number | null {
+function findByKeywords(lines, keywords) {
+  // Keyword order = priority; search each keyword over all lines (bottom-up for totals).
   for (const kw of keywords) {
     for (let i = lines.length - 1; i >= 0; i--) {
       const line = lines[i];
@@ -192,7 +188,7 @@ function findByKeywords(lines: string[], keywords: string[]): number | null {
   return null;
 }
 
-function findLabelValue(lines: string[], labels: string[]): string {
+function findLabelValue(lines, labels) {
   for (let i = 0; i < lines.length; i++) {
     const l = lines[i];
     const low = l.toLowerCase();
@@ -206,22 +202,22 @@ function findLabelValue(lines: string[], labels: string[]): string {
 }
 
 /** Detect document kind: 'slip' (bank transfer) or 'receipt'. */
-export function detectType(text: unknown): DocType {
+export function detectType(text) {
   const t = normalizeText(text).toLowerCase();
   const score = SLIP_KEYWORDS.filter((k) => t.includes(k)).length;
   return score >= 1 && !/ใบกำกับภาษี|tax invoice|receipt|ใบเสร็จ/.test(t) ? 'slip' : 'receipt';
 }
 
-function parseItems(lines: string[]): LineItem[] {
-  const items: LineItem[] = [];
+function parseItems(lines) {
+  const items = [];
   for (const line of lines) {
     if (has(line, SKIP_ITEM_KEYWORDS)) continue;
+    // "<name> <qty>x? <price>" or "<qty> <name> <price>"
     const m = line.match(/^(.*?[A-Za-z฀-๿].*?)\s+(\d{1,3}(?:,\d{3})*\.\d{2})$/);
     if (!m) continue;
     let name = m[1].trim();
     let qty = 1;
-    const q = name.match(/^(\d{1,3})\s*[xX@]?\s+(.+)$/)
-      || name.match(/^(.+?)\s+[xX]?\s*(\d{1,3})\s*[xX@]?(?:\s*\d+(?:\.\d{2})?)?$/);
+    const q = name.match(/^(\d{1,3})\s*[xX@]?\s+(.+)$/) || name.match(/^(.+?)\s+[xX]?\s*(\d{1,3})\s*[xX@]?(?:\s*\d+(?:\.\d{2})?)?$/);
     if (q) {
       if (/^\d/.test(q[1])) { qty = Number(q[1]); name = q[2]; } else { name = q[1]; qty = Number(q[2]); }
     }
@@ -232,18 +228,31 @@ function parseItems(lines: string[]): LineItem[] {
   return items;
 }
 
-/** Rule-based parse of plain text (fallback when the model doesn't return JSON). */
-export function parseDocument(rawText: unknown): ScanData {
+/** Main entry: raw OCR text → structured result. */
+export function parseDocument(rawText) {
   const text = normalizeText(rawText);
   const lines = text.split('\n');
-  const result = emptyScanData(detectType(text));
-  result.date = parseDate(text);
-  result.time = parseTime(text);
+  const type = detectType(text);
+
+  const result = {
+    type,
+    merchant: '',
+    date: parseDate(text),
+    time: parseTime(text),
+    total: null,
+    subtotal: null,
+    vat: null,
+    taxId: '',
+    reference: '',
+    from: '',
+    to: '',
+    items: [],
+  };
 
   const tax = text.replace(/[\s-]/g, '').match(/(?<!\d)\d{13}(?!\d)/);
   if (tax) result.taxId = tax[0];
 
-  if (result.type === 'slip') {
+  if (type === 'slip') {
     result.total = findByKeywords(lines, SLIP_AMOUNT_KEYWORDS);
     result.reference = (findLabelValue(lines, ['เลขที่รายการ', 'รหัสอ้างอิง', 'หมายเลขอ้างอิง', 'เลขอ้างอิง', 'ref. no', 'ref no', 'reference', 'transaction id', 'ref'])
       .match(/[A-Za-z0-9]{6,}/) || [''])[0];
@@ -258,6 +267,7 @@ export function parseDocument(rawText: unknown): ScanData {
     result.reference = (findLabelValue(lines, ['เลขที่ใบเสร็จ', 'เลขที่', 'receipt no', 'invoice no', 'bill no', 'no.'])
       .match(/[A-Za-z0-9\-/]{3,}/) || [''])[0];
     result.items = parseItems(lines);
+    // Merchant: first line with letters that isn't a header word.
     result.merchant = lines.find((l) => /[A-Za-z฀-๿]{3,}/.test(l)
       && !has(l, ['ใบเสร็จ', 'ใบกำกับ', 'receipt', 'invoice', 'tax id', 'เลขประจำตัว', 'วันที่', 'date'])) || '';
     if (result.total == null && result.items.length) {
@@ -265,6 +275,7 @@ export function parseDocument(rawText: unknown): ScanData {
     }
   }
 
+  // Fallback: largest money value in the document.
   if (result.total == null) {
     const all = lines.flatMap(amountsInLine).filter((a) => a.decimal);
     if (all.length) result.total = Math.max(...all.map((a) => a.value));
@@ -274,54 +285,4 @@ export function parseDocument(rawText: unknown): ScanData {
   result.to = result.to.slice(0, 80);
   result.merchant = result.merchant.slice(0, 80);
   return result;
-}
-
-const str = (v: unknown, max = 120) => (v == null ? '' : String(v).trim().slice(0, max));
-
-/**
- * Coerce a loosely-typed object (e.g. the vision model's JSON) into ScanData.
- * Missing fields are filled from `fallbackText` using the rule-based parser.
- */
-export function normalizeScanData(input: Record<string, unknown>, fallbackText = ''): ScanData {
-  const fb = fallbackText ? parseDocument(fallbackText) : emptyScanData();
-  const rawType = str(input.type).toLowerCase();
-  const type: DocType = /slip|transfer|โอน|สลิป/.test(rawType) ? 'slip' : /receipt|invoice|ใบเสร็จ|ใบกำกับ/.test(rawType) ? 'receipt' : fb.type;
-
-  const rawDate = str(input.date);
-  let date = /^\d{4}-\d{2}-\d{2}$/.test(rawDate) ? rawDate : parseDate(rawDate);
-  if (date) {
-    // The model may echo a Buddhist-Era year in ISO form ("2567-11-08").
-    const [y, m, d] = date.split('-').map(Number);
-    date = validDate(toCE(y), m, d) || '';
-  }
-
-  const items: LineItem[] = Array.isArray(input.items)
-    ? (input.items as Record<string, unknown>[])
-        .filter((it) => it && typeof it === 'object' && str(it.name))
-        .map((it) => ({
-          name: str(it.name),
-          qty: parseAmount(it.qty) ?? 1,
-          amount: parseAmount(it.amount ?? it.price ?? it.total),
-        }))
-    : [];
-
-  const pick = <K extends keyof ScanData>(key: K, value: ScanData[K]): ScanData[K] =>
-    value === '' || value == null ? fb[key] : value;
-
-  const taxId = thaiDigitsToArabic(str(input.taxId ?? input.tax_id)).replace(/\D/g, '');
-
-  return {
-    type,
-    merchant: pick('merchant', str(input.merchant, 80)),
-    date: pick('date', date),
-    time: pick('time', str(input.time) ? parseTime(str(input.time)) : ''),
-    total: pick('total', parseAmount(input.total)),
-    subtotal: pick('subtotal', parseAmount(input.subtotal)),
-    vat: pick('vat', parseAmount(input.vat)),
-    taxId: pick('taxId', taxId.length === 13 ? taxId : ''),
-    reference: pick('reference', str(input.reference, 60)),
-    from: pick('from', str(input.from, 80)),
-    to: pick('to', str(input.to, 80)),
-    items: items.length ? items : type === 'receipt' ? fb.items : [],
-  };
 }
